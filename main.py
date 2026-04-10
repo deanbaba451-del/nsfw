@@ -7,14 +7,14 @@ import cv2
 import time
 import logging
 
-# LOGLAMA AYARI - Her şeyi terminalde göreceksin
+# LOGLAMA
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# YENİ TOKEN (Logda verdiğin güncel haliyle)
-TOKEN = "8651145622:AAHC5x7JDtQRYbvzxnJg3iCiEhDry8mzt1w"
+# GÜNCEL TOKEN
+TOKEN = "8651145622:AAEmSrGND0ZXi8JDI3LmMxbdFCCowv8hgYU"
 
-# SIGHTENGINE AYARLARI
+# SIGHTENGINE BİLGİLERİ
 SIGHT_KEYS = [
     {"user": "713471034", "key": "FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd"},
     {"user": "1773861365", "key": "FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd"},
@@ -30,6 +30,19 @@ key_index = 0
 @app.route('/')
 def health(): return "system online", 200
 
+# BOT GRUBA EKLENDİĞİNDE VEYA BAŞLATILDIĞINDA
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "online")
+
+# BOT BİR GRUBA EKLENDİĞİNDE OTOMATİK MESAJ
+@bot.my_chat_member_handler()
+def on_join(message):
+    try:
+        if message.new_chat_member.status in ["administrator", "member"]:
+            bot.send_message(message.chat.id, "online")
+    except: pass
+
 def scan_content(img_data):
     global key_index
     for _ in range(len(SIGHT_KEYS)):
@@ -38,24 +51,21 @@ def scan_content(img_data):
             r = requests.post('https://api.sightengine.com/1.0/check.json', 
                              files={'media': ('img.jpg', img_data)}, 
                              data={'models': 'nudity-2.0,wad,violence', 'api_user': current["user"], 'api_secret': current["key"]}, 
-                             timeout=10)
+                             timeout=15)
             res = r.json()
             if res.get("status") == "success":
                 nude = res.get("nudity", {})
                 vals = [nude.get("sexual_activity", 0), nude.get("sexual_display", 0),
                         nude.get("erotica", 0), res.get("violence", 0), res.get("weapon", 0)]
                 max_val = max(vals)
-                logger.info(f"Tarama Tamamlandı. Skor: {max_val}")
+                logger.info(f"Skor: {max_val}")
                 return max_val >= THRESHOLD
             key_index += 1
-        except Exception as e:
-            logger.error(f"API Hatası: {e}")
-            key_index += 1
+        except: key_index += 1
     return False
 
 def check_and_delete(message, file_id, is_video=False):
     try:
-        logger.info(f"Medya indiriliyor: {file_id}")
         f_info = bot.get_file(file_id)
         content = bot.download_file(f_info.file_path)
         
@@ -80,36 +90,30 @@ def check_and_delete(message, file_id, is_video=False):
 
         if should_delete:
             bot.delete_message(message.chat.id, message.message_id)
-            logger.warning(f"SİLİNDİ: Chat {message.chat.id} üzerindeki uygunsuz içerik yok edildi.")
-        else:
-            logger.info("İçerik temiz, işlem yapılmadı.")
+            logger.warning("NSFW İçerik Silindi!")
     except Exception as e:
-        logger.error(f"İşlem Hatası: {e}")
+        logger.error(f"Hata: {e}")
 
-@bot.message_handler(content_types=['photo', 'video', 'animation', 'video_note', 'sticker'])
+@bot.message_handler(content_types=['photo', 'video', 'animation', 'video_note', 'sticker', 'document'])
 def handle_media(message):
-    logger.info(f"Yeni medya algılandı: {message.content_type}")
     fid = None
     is_v = False
     if message.photo: fid = message.photo[-1].file_id
     elif message.video: fid, is_v = message.video.file_id, True
     elif message.animation: fid, is_v = message.animation.file_id, True
     elif message.video_note: fid, is_v = message.video_note.file_id, True
-    
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith('video'):
+        fid, is_v = message.document.file_id, True
+
     if fid:
         threading.Thread(target=check_and_delete, args=(message, fid, is_v)).start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5050))
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, use_reloader=False)).start()
+    port = int(os.environ.get("PORT", 10000))
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, use_reloader=False), daemon=True).start()
     
-    # Başlangıç logları
-    try:
-        me = bot.get_me()
-        logger.info(f"BOT AKTİF: @{me.username} olarak giriş yapıldı.")
-    except Exception as e:
-        logger.critical(f"Giriş Başarısız! Tokeni kontrol et: {e}")
-
     bot.remove_webhook()
     time.sleep(1)
+    
+    logger.info("Bot baslatildi.")
     bot.infinity_polling(skip_pending=True)
