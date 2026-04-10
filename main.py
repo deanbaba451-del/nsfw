@@ -6,6 +6,7 @@ import tempfile
 import subprocess
 from PIL import Image
 from threading import Thread
+from flask import Flask
 
 TOKEN = "8680617687:AAEYm5IqL63Ex_I6cJDDQURSemKM2uTcJy0"
 
@@ -17,6 +18,11 @@ THRESHOLD = 0.60
 API_INDEX = 0
 
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "bot calisiyor"
 
 def get_api_creds():
     global API_INDEX
@@ -188,5 +194,10 @@ def handle_document(message):
     if message.document.mime_type and any(t in message.document.mime_type for t in ['image', 'video', 'gif']):
         Thread(target=process_media, args=(message, message.document.file_id, "photo")).start()
 
+def run_flask():
+    port = int(os.getenv('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
 if __name__ == "__main__":
+    Thread(target=run_flask).start()
     bot.infinity_polling(timeout=30, long_polling_timeout=15)
