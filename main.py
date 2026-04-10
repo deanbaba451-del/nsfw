@@ -10,11 +10,11 @@ from flask import Flask
 
 TOKEN = "8680617687:AAEYm5IqL63Ex_I6cJDDQURSemKM2uTcJy0"
 
-# api anahtarlari buraya yaz
+# api anahtarlari
 SIGHT_USERS = ["713471034", "1773861365", "402404015", "1968951124"]
 SIGHT_KEYS = ["FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd", "FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd", "i7XWhsXdC75RXGZKbq5b5hLuSzqBUkwz", "JvmFQVqSKLsfCC6nmB42UiepYpYFALdB"]
 
-THRESHOLD = 0.60
+THRESHOLD = 0.40  # düşürüldü
 API_INDEX = 0
 
 bot = telebot.TeleBot(TOKEN)
@@ -34,7 +34,7 @@ def get_api_creds():
 def scan_content(img_data):
     user, key = get_api_creds()
     params = {
-        'models': 'nudity-2.0,wad,offensive,text-content,gore',
+        'models': 'nudity-2.1,weapon,alcohol,drugs,offensive,gore,child',
         'api_user': user,
         'api_secret': key
     }
@@ -42,7 +42,7 @@ def scan_content(img_data):
     
     try:
         r = requests.post('https://api.sightengine.com/1.0/check.json', 
-                         files=files, data=params, timeout=15)
+                         files=files, data=params, timeout=10)
         res = r.json()
         
         if res.get("status") != "success":
@@ -50,6 +50,7 @@ def scan_content(img_data):
 
         scores = []
         
+        # nudity
         nude = res.get("nudity", {})
         scores.extend([
             nude.get("sexual_activity", 0),
@@ -60,27 +61,41 @@ def scan_content(img_data):
             nude.get("partial", 0)
         ])
         
-        scores.extend([
-            res.get("weapon", 0),
-            res.get("alcohol", 0),
-            res.get("drugs", 0)
-        ])
+        # weapon
+        weapon = res.get("weapon", {})
+        scores.append(weapon.get("classes", {}).get("firearm", 0))
+        scores.append(weapon.get("classes", {}).get("knife", 0))
+        scores.append(weapon.get("prob", 0))
         
+        # alcohol
+        alcohol = res.get("alcohol", {})
+        scores.append(alcohol.get("prob", 0))
+        
+        # drugs
+        drugs = res.get("drugs", {})
+        scores.append(drugs.get("prob", 0))
+        
+        # gore
         gore = res.get("gore", {})
-        scores.extend([
-            gore.get("prob", 0),
-            gore.get("gore", 0)
-        ])
+        scores.append(gore.get("prob", 0))
         
+        # offensive
         off = res.get("offensive", {})
         scores.append(off.get("prob", 0))
         
+        # child
         child = res.get("child", {})
         scores.append(child.get("prob", 0))
         
+        # scam
+        scam = res.get("scam", {})
+        scores.append(scam.get("prob", 0))
+        
         high_score = max(scores) if scores else 0
+        print(f"skor: {high_score} - kategoriler: {res.keys()}")  # debug
         return high_score >= THRESHOLD, high_score
-    except:
+    except Exception as e:
+        print(f"api hatasi: {e}")
         return False, 0
 
 def extract_video_frames(video_data):
@@ -94,20 +109,23 @@ def extract_video_frames(video_data):
                '-of', 'default=noprint_wrappers=1:nokey=1', tmp_path]
         duration = float(subprocess.check_output(cmd).decode().strip())
         
-        check_points = [0.1, duration/2, duration-0.5] if duration > 2 else [0.1]
+        # 5 farklı noktadan frame al (daha kapsamlı)
+        check_points = [0.1, duration*0.25, duration*0.5, duration*0.75, duration-0.5]
+        check_points = [p for p in check_points if p < duration]
         
         for pt in check_points:
             out_frame = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
             cmd = ['ffmpeg', '-ss', str(pt), '-i', tmp_path, 
                    '-vframes', '1', '-q:v', '2', out_frame.name, '-y']
-            subprocess.run(cmd, capture_output=True)
+            subprocess.run(cmd, capture_output=True, timeout=5)
             
-            with open(out_frame.name, 'rb') as f:
-                frames.append(f.read())
+            if os.path.getsize(out_frame.name) > 0:
+                with open(out_frame.name, 'rb') as f:
+                    frames.append(f.read())
             os.unlink(out_frame.name)
             
-    except:
-        pass
+    except Exception as e:
+        print(f"frame hatasi: {e}")
     finally:
         os.unlink(tmp_path)
     
@@ -118,34 +136,37 @@ def process_media(message, file_id, media_type="photo"):
         file_info = bot.get_file(file_id)
         content = bot.download_file(file_info.file_path)
         
-        if media_type == "photo" or media_type == "sticker":
+        if media_type in ["photo", "sticker"]:
             img = Image.open(io.BytesIO(content))
             if img.mode != 'RGB':
                 img = img.convert("RGB")
+            # kaliteyi düşürüp boyutu küçült (hızlı upload)
+            img.thumbnail((800, 800))
             out = io.BytesIO()
-            img.save(out, format="JPEG")
+            img.save(out, format="JPEG", quality=70)
             processed = out.getvalue()
             
             is_bad, score = scan_content(processed)
             if is_bad:
-                Thread(target=delete_silent, args=(message,)).start()
+                delete_silent(message)
                 
         elif media_type in ["video", "animation", "gif"]:
             frames = extract_video_frames(content)
             for frame_data in frames:
                 is_bad, score = scan_content(frame_data)
                 if is_bad:
-                    Thread(target=delete_silent, args=(message,)).start()
+                    delete_silent(message)
                     break
                     
-    except:
-        pass
+    except Exception as e:
+        print(f"islem hatasi: {e}")
 
 def delete_silent(message):
     try:
         bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass
+        print(f"silindi: {message.chat.id}")
+    except Exception as e:
+        print(f"silme hatasi: {e}")
 
 @bot.message_handler(commands=['start'])
 def start(message):
