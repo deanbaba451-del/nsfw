@@ -11,55 +11,63 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# GÜNCEL TOKEN
 TOKEN = "8651145622:AAEmSrGND0ZXi8JDI3LmMxbdFCCowv8hgYU"
 
-# SIGHTENGINE BİLGİLERİ
+# SIGHTENGINE AYARLARI
 SIGHT_KEYS = [
     {"user": "713471034", "key": "FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd"},
     {"user": "1773861365", "key": "FjffWWjDqyr9Jz7f44FsXt8ACMwBvFAd"},
     {"user": "402404015", "key": "i7XWhsXdC75RXGZKbq5b5hLuSzqBUkwz"},
     {"user": "1968951124", "key": "JvmFQVqSKLsfCC6nmB42UiepYpYFALdB"}
 ]
-THRESHOLD = 0.60
+# Hassas içerikler için eşiği 0.50'ye çektim (Daha katı)
+THRESHOLD = 0.50
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 key_index = 0
 
 @app.route('/')
-def health(): return "system online", 200
-
-# BOT GRUBA EKLENDİĞİNDE VEYA BAŞLATILDIĞINDA
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    bot.reply_to(message, "online")
-
-# BOT BİR GRUBA EKLENDİĞİNDE OTOMATİK MESAJ
-@bot.my_chat_member_handler()
-def on_join(message):
-    try:
-        if message.new_chat_member.status in ["administrator", "member"]:
-            bot.send_message(message.chat.id, "online")
-    except: pass
+def health(): return "media security active", 200
 
 def scan_content(img_data):
     global key_index
     for _ in range(len(SIGHT_KEYS)):
         current = SIGHT_KEYS[key_index % len(SIGHT_KEYS)]
         try:
+            # MODELLER: Nudity, Violence, WAD (Silah/Uyuşturucu), Minor (CSAM), Animal Welfare
             r = requests.post('https://api.sightengine.com/1.0/check.json', 
                              files={'media': ('img.jpg', img_data)}, 
-                             data={'models': 'nudity-2.0,wad,violence', 'api_user': current["user"], 'api_secret': current["key"]}, 
-                             timeout=15)
+                             data={
+                                 'models': 'nudity-2.0,wad,violence,minor,animal-welfare', 
+                                 'api_user': current["user"], 
+                                 'api_secret': current["key"]
+                             }, timeout=15)
             res = r.json()
             if res.get("status") == "success":
+                scores = []
+                
+                # 1. Müstehcenlik & Porno
                 nude = res.get("nudity", {})
-                vals = [nude.get("sexual_activity", 0), nude.get("sexual_display", 0),
-                        nude.get("erotica", 0), res.get("violence", 0), res.get("weapon", 0)]
-                max_val = max(vals)
-                logger.info(f"Skor: {max_val}")
-                return max_val >= THRESHOLD
+                scores.extend([nude.get("sexual_activity", 0), nude.get("sexual_display", 0), nude.get("erotica", 0)])
+                
+                # 2. Şiddet, Silahlar, Yasadışı Maddeler (WAD)
+                scores.append(res.get("violence", 0))
+                scores.append(res.get("weapon", 0))
+                scores.append(res.get("drugs", 0))
+                
+                # 3. CSAM (Çocuk İstismarı tespiti için 'minor' modeli)
+                minor = res.get("minor", {})
+                scores.append(minor.get("prob", 0))
+                
+                # 4. Hayvan İstismarı
+                animal = res.get("animal-welfare", {})
+                scores.append(animal.get("prob", 0))
+
+                max_score = max(scores)
+                logger.info(f"Medya Analiz Skoru: {max_score}")
+                return max_score >= THRESHOLD
+            
             key_index += 1
         except: key_index += 1
     return False
@@ -68,14 +76,15 @@ def check_and_delete(message, file_id, is_video=False):
     try:
         f_info = bot.get_file(file_id)
         content = bot.download_file(f_info.file_path)
-        
         should_delete = False
+        
         if is_video:
             t_path = f"tmp_{file_id}.mp4"
             with open(t_path, "wb") as f: f.write(content)
             cap = cv2.VideoCapture(t_path)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            for p in [0.2, 0.5, 0.8]:
+            # Videodan 5 farklı kare alarak sızma ihtimalini bitiriyoruz
+            for p in [0.1, 0.3, 0.5, 0.7, 0.9]:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * p))
                 ret, frame = cap.read()
                 if ret:
@@ -90,10 +99,10 @@ def check_and_delete(message, file_id, is_video=False):
 
         if should_delete:
             bot.delete_message(message.chat.id, message.message_id)
-            logger.warning("NSFW İçerik Silindi!")
-    except Exception as e:
-        logger.error(f"Hata: {e}")
+            logger.warning(f"KRİTİK İHLAL SİLİNDİ: {message.chat.id}")
+    except: pass
 
+# SADECE MEDYA TÜRLERİ (Metin mesajlarını ellemez)
 @bot.message_handler(content_types=['photo', 'video', 'animation', 'video_note', 'sticker', 'document'])
 def handle_media(message):
     fid = None
@@ -104,16 +113,24 @@ def handle_media(message):
     elif message.video_note: fid, is_v = message.video_note.file_id, True
     elif message.document and message.document.mime_type and message.document.mime_type.startswith('video'):
         fid, is_v = message.document.file_id, True
-
+    
     if fid:
         threading.Thread(target=check_and_delete, args=(message, fid, is_v)).start()
+
+# Metin mesajlarını görmezden gelmek için handler boş bırakılabilir veya hiç eklenmez.
+# Bot bu haliyle sadece yukarıdaki content_types listesine tepki verir.
+
+def run_bot():
+    while True:
+        try:
+            bot.remove_webhook()
+            logger.info("Bot Online: Medya koruması devrede.")
+            bot.infinity_polling(skip_pending=True, timeout=60)
+        except Exception as e:
+            logger.error(f"Hata: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, use_reloader=False), daemon=True).start()
-    
-    bot.remove_webhook()
-    time.sleep(1)
-    
-    logger.info("Bot baslatildi.")
-    bot.infinity_polling(skip_pending=True)
+    run_bot()
